@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MemeForge — Meme Generator</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <header>
+    <div class="logo-icon">M</div>
+    <h1>Meme<span>Forge</span></h1>
+    <span class="header-tag">Meme Generator</span>
+  </header>
+
+  <main>
+
+    <!-- ── Section 1: Browse Templates ── -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-num">1</div>
+        <h2>Browse Templates</h2>
+        <span id="template-count" class="count-badge"></span>
+      </div>
+      <div class="section-body">
+
+        <div class="browser-toolbar">
+          <div class="search-wrap">
+            <svg class="search-icon" viewBox="0 0 20 20" fill="none">
+              <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+              <path d="M13.5 13.5L17 17" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+            </svg>
+            <input type="text" id="search-input" placeholder="Search memes…" autocomplete="off" />
+            <button id="search-clear" class="search-clear" title="Clear">✕</button>
+          </div>
+        </div>
+
+        <div class="genre-pills" id="genre-pills">
+          <button class="pill active" data-genre="all">All</button>
+          <button class="pill" data-genre="reaction">Reaction</button>
+          <button class="pill" data-genre="drake">Drake / Choice</button>
+          <button class="pill" data-genre="brain">Brain / IQ</button>
+          <button class="pill" data-genre="change">Change My Mind</button>
+          <button class="pill" data-genre="animals">Animals</button>
+          <button class="pill" data-genre="classic">Classic</button>
+          <button class="pill" data-genre="wholesome">Wholesome</button>
+          <button class="pill" data-genre="political">Political</button>
+          <button class="pill" data-genre="gaming">Gaming</button>
+          <button class="pill" data-genre="sports">Sports</button>
+          <button class="pill" data-genre="money">Money</button>
+        </div>
+
+        <div id="template-grid"></div>
+        <div id="grid-empty" class="grid-empty" style="display:none">
+          <span>😶</span>
+          <p>No memes found. Try a different search or genre.</p>
+        </div>
+
+        <div id="load-more-wrap" class="load-more-wrap">
+          <button id="load-more-btn" class="btn-load-more">Load More</button>
+        </div>
+
+        <div class="divider">or paste any image URL</div>
+        <div class="field-group" style="margin-top:12px;">
+          <label for="custom-url">Custom Image URL</label>
+          <input type="url" id="custom-url" placeholder="https://example.com/meme.jpg" />
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── Section 2: Canvas Zone Editor ── -->
+    <section class="section" id="editor-section">
+      <div class="section-header">
+        <div class="section-num">2</div>
+        <h2>Edit Zones &amp; Text &nbsp;<span id="zone-count" class="zone-badge"></span></h2>
+      </div>
+      <div class="section-body editor-body">
+
+        <!-- Selected template info bar -->
+        <div class="selected-thumb-wrap" id="selected-thumb-wrap" style="display:none">
+          <img id="selected-thumb" src="" alt="" />
+          <div class="selected-thumb-info">
+            <span id="selected-name">—</span>
+            <button id="change-template-btn" class="btn-change">Change template</button>
+          </div>
+        </div>
+
+        <!-- Two-column layout: canvas left, inputs right -->
+        <div class="editor-columns">
+
+          <!-- Canvas editor -->
+          <div class="canvas-col">
+            <div id="canvas-editor-wrap" style="display:none">
+              <canvas id="zone-editor-canvas"></canvas>
+              <!-- Hint bar below canvas -->
+              <div id="editor-hint" class="editor-hint" style="display:none">
+                <span>🖱 <strong>Drag</strong> a zone to move &nbsp;·&nbsp; <strong>Corner handle</strong> to resize &nbsp;·&nbsp; Click empty area to deselect</span>
+              </div>
+            </div>
+            <div id="canvas-placeholder" class="canvas-placeholder">
+              <div class="placeholder-icon">🖼️</div>
+              <p>Pick a template to start editing zones</p>
+            </div>
+          </div>
+
+          <!-- Text inputs + controls -->
+          <div class="inputs-col">
+            <div id="text-fields">
+              <p class="pick-hint">← Pick a template above to see text fields</p>
+            </div>
+
+            <div class="controls-row" style="margin-top:16px;">
+              <div class="slider-wrapper">
+                <div class="slider-header">
+                  <label for="font-size">Font Size</label>
+                  <span class="slider-value" id="font-size-value">40</span>
+                </div>
+                <input type="range" id="font-size" min="14" max="80" value="40" />
+              </div>
+              <div class="color-field">
+                <label for="text-color">Color</label>
+                <input type="color" id="text-color" value="#ffffff" />
+              </div>
+            </div>
+
+            <button class="btn-generate" id="generate-btn">Generate Meme</button>
+            <div id="error-msg"></div>
+          </div>
+
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ── Section 3: Preview ── -->
+    <section class="section">
+      <div class="section-header">
+        <div class="section-num">3</div>
+        <h2>Preview &amp; Download</h2>
+      </div>
+      <div class="section-body">
+        <div id="spinner">
+          <div class="spin-ring"></div>
+          Generating your meme…
+        </div>
+        <div class="preview-area">
+          <div id="preview-placeholder">
+            <div class="placeholder-icon">🖼️</div>
+            <p>Your meme will appear here</p>
+          </div>
+          <img id="meme-preview" alt="Generated meme" />
+        </div>
+        <button class="btn-download" id="download-btn" disabled>Download meme.png</button>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/js/main.js"></script>
+</body>
+</html>
