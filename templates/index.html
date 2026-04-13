@@ -21,7 +21,7 @@
       <div class="section-header">
         <div class="section-num">1</div>
         <h2>Browse Templates</h2>
-        <span id="template-count" class="count-badge"></span>
+        <span id="template-count" class="count-badge">Loading…</span>
       </div>
       <div class="section-body">
 
@@ -53,18 +53,36 @@
 
         <div id="template-grid"></div>
         <div id="grid-empty" class="grid-empty" style="display:none">
-          <span>😶</span>
-          <p>No memes found. Try a different search or genre.</p>
+          <span>😶</span><p>No memes found.</p>
         </div>
+
+        <!-- Infinite-scroll sentinel (IntersectionObserver target) -->
+        <div id="scroll-sentinel"></div>
 
         <div id="load-more-wrap" class="load-more-wrap">
           <button id="load-more-btn" class="btn-load-more">Load More</button>
         </div>
 
-        <div class="divider">or paste any image URL</div>
-        <div class="field-group" style="margin-top:12px;">
-          <label for="custom-url">Custom Image URL</label>
-          <input type="url" id="custom-url" placeholder="https://example.com/meme.jpg" />
+        <!-- ── Import meme by URL (with OCR) ── -->
+        <div class="divider">import &amp; edit any meme by URL</div>
+        <div class="import-url-box">
+          <div class="import-url-row">
+            <div class="import-icon">🔗</div>
+            <div class="import-fields">
+              <label for="custom-url">Paste a meme image URL</label>
+              <input type="url" id="custom-url"
+                placeholder="https://i.imgflip.com/… or any .jpg / .png link" />
+              <p class="import-hint">
+                MemeForge will <strong>read existing text</strong> on the meme, detect zones
+                and pre-fill them — so you can remix it instantly.
+              </p>
+            </div>
+            <button id="import-url-btn" class="btn-import">
+              <span id="import-btn-label">Extract &amp; Import</span>
+              <div id="import-spinner" class="import-spinner" style="display:none"></div>
+            </button>
+          </div>
+          <div id="import-status" class="import-status" style="display:none"></div>
         </div>
 
       </div>
@@ -78,37 +96,34 @@
       </div>
       <div class="section-body editor-body">
 
-        <!-- Selected template info bar -->
         <div class="selected-thumb-wrap" id="selected-thumb-wrap" style="display:none">
           <img id="selected-thumb" src="" alt="" />
           <div class="selected-thumb-info">
             <span id="selected-name">—</span>
             <button id="change-template-btn" class="btn-change">Change template</button>
           </div>
+          <div id="ocr-badge" class="ocr-badge" style="display:none">✨ Text extracted from image</div>
         </div>
 
-        <!-- Two-column layout: canvas left, inputs right -->
         <div class="editor-columns">
 
-          <!-- Canvas editor -->
           <div class="canvas-col">
             <div id="canvas-editor-wrap" style="display:none">
               <canvas id="zone-editor-canvas"></canvas>
-              <!-- Hint bar below canvas -->
               <div id="editor-hint" class="editor-hint" style="display:none">
-                <span>🖱 <strong>Drag</strong> a zone to move &nbsp;·&nbsp; <strong>Corner handle</strong> to resize &nbsp;·&nbsp; Click empty area to deselect</span>
+                <span>🖱 <strong>Drag</strong> zone to move &nbsp;·&nbsp;
+                  <strong>Corner ⤡</strong> to resize &nbsp;·&nbsp; Click empty space to deselect</span>
               </div>
             </div>
             <div id="canvas-placeholder" class="canvas-placeholder">
               <div class="placeholder-icon">🖼️</div>
-              <p>Pick a template to start editing zones</p>
+              <p>Pick a template or paste a URL to start editing</p>
             </div>
           </div>
 
-          <!-- Text inputs + controls -->
           <div class="inputs-col">
             <div id="text-fields">
-              <p class="pick-hint">← Pick a template above to see text fields</p>
+              <p class="pick-hint">← Pick a template above</p>
             </div>
 
             <div class="controls-row" style="margin-top:16px;">
@@ -130,7 +145,6 @@
           </div>
 
         </div>
-
       </div>
     </section>
 
@@ -141,10 +155,7 @@
         <h2>Preview &amp; Download</h2>
       </div>
       <div class="section-body">
-        <div id="spinner">
-          <div class="spin-ring"></div>
-          Generating your meme…
-        </div>
+        <div id="spinner"><div class="spin-ring"></div>Generating your meme…</div>
         <div class="preview-area">
           <div id="preview-placeholder">
             <div class="placeholder-icon">🖼️</div>
