@@ -1,11 +1,11 @@
 (() => {
   // ── State ──────────────────────────────────────────────────────────────────
-  let allMemes       = [];      // local cache of fetched memes
+  let allMemes       = [];
   let filteredMemes  = [];
   let displayedCount = 0;
   const PAGE_SIZE    = 24;
-  let apiPage        = 0;       // current page for /api/memes
-  let apiHasMore     = true;    // whether server has more memes
+  let apiPage        = 0;
+  let apiHasMore     = true;
   let apiFetching    = false;
 
   let selectedMeme   = null;
@@ -13,7 +13,9 @@
   let selectedName   = '';
   let currentZones   = [];
   let zoneDetecting  = false;
-  let isOcrImport    = false;   // true when zones came from OCR extraction
+  let isOcrImport    = false;
+  let isGif          = false;      // NEW: track GIF state
+  let generatedGifB64 = null;      // NEW: hold GIF base64
 
   let activeGenre    = 'all';
   let searchQuery    = '';
@@ -81,7 +83,6 @@
       apiPage++;
 
       document.getElementById('template-count').textContent = `${data.total}+ memes`;
-
       applyFiltersLocally();
     } catch (e) {
       console.error('Failed to load memes:', e);
@@ -97,12 +98,8 @@
     if (!sentinel || !('IntersectionObserver' in window)) return;
     const obs = new IntersectionObserver(entries => {
       if (entries[0].isIntersecting && !apiFetching) {
-        // First exhaust local filtered pool, then fetch next server page
-        if (displayedCount < filteredMemes.length) {
-          renderNextSlice();
-        } else if (apiHasMore) {
-          loadNextPage();
-        }
+        if (displayedCount < filteredMemes.length) renderNextSlice();
+        else if (apiHasMore) loadNextPage();
       }
     }, { rootMargin: '200px' });
     obs.observe(sentinel);
@@ -118,7 +115,7 @@
     return 'classic';
   }
 
-  // ── Local filtering (on already-fetched memes) ─────────────────────────────
+  // ── Local filtering ────────────────────────────────────────────────────────
   function applyFiltersLocally() {
     const q = searchQuery.trim().toLowerCase();
     filteredMemes = allMemes.filter(m => {
@@ -127,18 +124,13 @@
       return mg && ms;
     });
 
-    // Only reset grid if search/genre changed (not during pagination)
     const grid = document.getElementById('template-grid');
-    // Count currently rendered cards
     const rendered = grid.querySelectorAll('.template-card').length;
-    if (rendered === 0) {
-      displayedCount = 0;
-    }
+    if (rendered === 0) displayedCount = 0;
 
     document.getElementById('grid-empty').style.display =
       filteredMemes.length === 0 ? 'flex' : 'none';
 
-    // Render any new items that weren't yet shown
     renderNextSlice();
   }
 
@@ -155,34 +147,43 @@
     document.getElementById('template-grid').innerHTML = '';
     displayedCount = 0;
     filteredMemes  = [];
-    // Re-filter from current allMemes first (instant), then fetch more if needed
     applyFiltersLocally();
-    if (filteredMemes.length < PAGE_SIZE && apiHasMore) {
-      loadNextPage();
-    }
+    if (filteredMemes.length < PAGE_SIZE && apiHasMore) loadNextPage();
+  }
+
+  // ── GIF detection helper ──────────────────────────────────────────────────
+  function urlIsGif(url) {
+    return /\.gif(\?|$)/i.test(url);
   }
 
   // ── Card creation ──────────────────────────────────────────────────────────
   function createCard(meme) {
     const card = document.createElement('div');
     card.className = 'template-card';
+
     const img = document.createElement('img');
     img.src = meme.url; img.alt = meme.name; img.loading = 'lazy';
-    // Error fallback
     img.onerror = () => { card.style.display = 'none'; };
+
     const lbl = document.createElement('span');
     lbl.className = 'template-label'; lbl.textContent = meme.name;
+
     const bb = document.createElement('span');
     bb.className = 'box-badge';
     bb.textContent = `${meme.boxes || 2} zone${(meme.boxes||2) !== 1 ? 's' : ''}`;
+
     const gb = document.createElement('span');
     gb.className = 'genre-badge'; gb.textContent = meme.genre || 'classic';
-    // Source badge
-    const sb = document.createElement('span');
-    sb.className = 'source-badge';
-    const src = (meme.source || 'imgflip');
-    sb.textContent = src.startsWith('reddit/') ? '🟠 ' + src.split('/')[1] : '🟢 imgflip';
-    card.append(img, lbl, bb, gb, sb);
+
+    // GIF badge
+    if (urlIsGif(meme.url)) {
+      const gifBadge = document.createElement('span');
+      gifBadge.className = 'gif-badge';
+      gifBadge.textContent = 'GIF';
+      card.append(gifBadge);
+    }
+
+    card.append(img, lbl, bb, gb);
     card.addEventListener('click', () => selectTemplate(meme, card));
     return card;
   }
@@ -192,13 +193,38 @@
     if (zoneDetecting) return;
     selectedMeme = meme; selectedUrl = meme.url; selectedName = meme.name;
     isOcrImport = false;
+    isGif = urlIsGif(meme.url);
+    generatedGifB64 = null;
+
     document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
     if (cardEl) cardEl.classList.add('selected');
-    document.getElementById('editor-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+
+    // NO auto-scroll — user stays where they are
     document.getElementById('ocr-badge').style.display = 'none';
     clearError();
     updateThumbBar(meme.url, meme.name);
+
+    // Show GIF notice if applicable
+    updateGifNotice();
+
     await loadZones(meme.url);
+  }
+
+  function updateGifNotice() {
+    let notice = document.getElementById('gif-notice');
+    if (isGif) {
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.id = 'gif-notice';
+        notice.className = 'gif-notice';
+        notice.innerHTML = '🎞️ <strong>GIF detected</strong> — will be exported as animated GIF with overlaid text';
+        const wrap = document.getElementById('selected-thumb-wrap');
+        if (wrap) wrap.after(notice);
+      }
+      notice.style.display = 'flex';
+    } else {
+      if (notice) notice.style.display = 'none';
+    }
   }
 
   function updateThumbBar(url, name) {
@@ -236,8 +262,16 @@
   // ── OCR Import ─────────────────────────────────────────────────────────────
   async function importUrlWithOcr(url) {
     if (!url) { showImportStatus('error', 'Please paste a valid image URL.'); return; }
+
+    // Validate URL format
+    try { new URL(url); } catch { showImportStatus('error', 'Invalid URL format.'); return; }
+
     setImportLoading(true);
     showImportStatus('info', 'Downloading image and extracting text…');
+
+    isGif = urlIsGif(url);
+    generatedGifB64 = null;
+
     try {
       const res  = await fetch('/api/extract-text', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -245,7 +279,8 @@
       });
       const data = await res.json();
       if (!res.ok || data.error) {
-        showImportStatus('error', data.error || 'Could not extract text.'); return;
+        showImportStatus('error', data.error || 'Could not extract text. Check the URL points to a public image.');
+        return;
       }
 
       selectedUrl  = url;
@@ -253,44 +288,44 @@
       selectedMeme = { url, name: 'Imported Meme', boxes: data.zones.length };
       isOcrImport  = true;
 
-      // Build zones — if OCR found text, pre-fill inputs with that text
       currentZones = data.zones.map(z => ({
-        label:  z.label || z.text || 'Text zone',
+        label:    z.label || z.text || 'Text zone',
         x: z.x, y: z.y, w: z.w, h: z.h,
-        pos: z.pos || 'center',
-        _id: ++zoneCounter,
-        _prefill: z.text || '',   // original detected text
+        pos:      z.pos || 'center',
+        _id:      ++zoneCounter,
+        _prefill: z.text || '',
       }));
 
       const method = data.method;
       const count  = currentZones.length;
       const msg = method === 'ocr'
-        ? `✅ Found ${count} text zone${count!==1?'s':''} with existing text — pre-filled below. Edit to remix!`
-        : `ℹ️ No OCR text found — ${count} layout zone${count!==1?'s':''} detected. Start typing!`;
+        ? `✅ Found ${count} text zone${count!==1?'s':''} — existing text pre-filled. Edit to remix!`
+        : `ℹ️ No text detected — ${count} layout zone${count!==1?'s':''} added. Start typing!`;
 
       showImportStatus(method === 'ocr' ? 'success' : 'info', msg);
 
       document.querySelectorAll('.template-card').forEach(c => c.classList.remove('selected'));
       updateThumbBar(url, 'Imported Meme');
+      updateGifNotice();
 
       const ocrBadge = document.getElementById('ocr-badge');
       ocrBadge.style.display = method === 'ocr' ? 'flex' : 'none';
 
-      document.getElementById('editor-section').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // NO auto-scroll
 
-      // Render inputs with pre-filled text
       renderAll(false);
-      // After render, fill input values with detected text
+
+      // Pre-fill inputs with detected text so user can edit them
       if (method === 'ocr') {
         currentZones.forEach((zone, i) => {
           const el = document.getElementById(`zone-${i}`);
           if (el && zone._prefill) el.value = zone._prefill;
         });
-        redrawCanvas(); // update canvas with the pre-filled text
+        redrawCanvas();
       }
 
     } catch (e) {
-      showImportStatus('error', `Network error: ${e.message}`);
+      showImportStatus('error', `Network error: ${e.message}. Make sure the server is running.`);
     } finally {
       setImportLoading(false);
     }
@@ -361,15 +396,21 @@
       });
 
       const delBtn = document.createElement('button');
-      delBtn.className = 'zone-delete-btn'; delBtn.innerHTML = '✕';
-      delBtn.title = 'Delete zone';
+      delBtn.className = 'zone-del';
+      delBtn.innerHTML = '✕'; delBtn.title = 'Delete zone';
       delBtn.addEventListener('click', () => deleteZone(i));
 
       labelRow.append(dot, nameInp, delBtn);
 
       const inp = document.createElement('input');
       inp.type = 'text'; inp.id = `zone-${i}`;
-      inp.placeholder = zone.label + '…';
+      inp.className = 'zone-text-input';
+      inp.placeholder = `Enter ${zone.label}…`;
+
+      // KEY FIX: Pre-fill with existing text if available (_prefill from OCR or zone.text)
+      const prefillText = zone._prefill || zone.text || '';
+      if (prefillText) inp.value = prefillText;
+
       inp.addEventListener('focus', () => { activeZoneIdx = i; redrawCanvas(); });
       inp.addEventListener('input', () => redrawCanvas());
 
@@ -389,6 +430,9 @@
     const n = currentZones.length;
     badge.textContent = `${n} zone${n!==1?'s':''} ${isFallback ? '(fallback)' : '✓'}`;
     badge.className   = 'zone-badge' + (isFallback ? ' zone-badge--fallback' : '');
+
+    // Redraw canvas after inputs are rendered so live text preview works
+    setTimeout(() => redrawCanvas(), 0);
   }
 
   function deleteZone(idx) {
@@ -433,7 +477,12 @@
       editorImg = new Image();
       if (co) editorImg.crossOrigin = 'anonymous';
       editorImg.onload  = () => { resizeCanvas(); redrawCanvas(); };
-      editorImg.onerror = co ? () => tryLoad(false) : null;
+      editorImg.onerror = co ? () => tryLoad(false) : () => {
+        // Try loading via a proxy approach: use the URL directly without CORS
+        editorImg = new Image();
+        editorImg.onload = () => { resizeCanvas(); redrawCanvas(); };
+        editorImg.src = url + (url.includes('?') ? '&' : '?') + '_nocors=1';
+      };
       editorImg.src = url;
     };
     tryLoad(true);
@@ -479,7 +528,7 @@
       editorCtx.textAlign = 'center'; editorCtx.textBaseline = 'middle';
       editorCtx.fillText(i+1, bx, by+0.5);
 
-      // Live text preview
+      // Live text preview from input value
       const tv = (document.getElementById(`zone-${i}`) || {}).value || '';
       if (tv.trim()) {
         const fs = Math.max(10, Math.min(ph*0.28, pw*0.10, 20));
@@ -527,7 +576,6 @@
   function onDown(e) {
     if (!currentZones.length) return;
     const { x: mx, y: my } = cpos(e);
-    const cw = editorCanvas.width, ch = editorCanvas.height;
     if (activeZoneIdx>=0 && activeZoneIdx<currentZones.length &&
         isOnHandle(mx, my, currentZones[activeZoneIdx])) {
       dragState = { type:'resize', zoneIdx:activeZoneIdx, startX:mx, startY:my, origZone:{...currentZones[activeZoneIdx]} };
@@ -574,7 +622,6 @@
 
   // ── Bind events ────────────────────────────────────────────────────────────
   function bindEvents() {
-    // Search — reset + reload from server
     const si = document.getElementById('search-input');
     const sc = document.getElementById('search-clear');
     let searchDbt;
@@ -583,7 +630,6 @@
       sc.style.display = searchQuery ? 'flex' : 'none';
       clearTimeout(searchDbt);
       searchDbt = setTimeout(() => {
-        // For short queries try local filter first; reload from server if too few results
         const localFiltered = allMemes.filter(m => m.name.toLowerCase().includes(searchQuery.toLowerCase()));
         if (localFiltered.length >= PAGE_SIZE || !apiHasMore) {
           document.getElementById('template-grid').innerHTML = '';
@@ -600,7 +646,6 @@
       loadNextPage(true);
     });
 
-    // Genre pills
     document.getElementById('genre-pills').addEventListener('click', e => {
       const p = e.target.closest('.pill'); if (!p) return;
       document.querySelectorAll('.pill').forEach(x => x.classList.remove('active'));
@@ -610,13 +655,11 @@
       applyFiltersLocally();
     });
 
-    // Load more button
     document.getElementById('load-more-btn').addEventListener('click', () => {
       if (displayedCount < filteredMemes.length) renderNextSlice();
       else if (apiHasMore) loadNextPage();
     });
 
-    // Import URL button
     document.getElementById('import-url-btn').addEventListener('click', () => {
       const url = document.getElementById('custom-url').value.trim();
       importUrlWithOcr(url);
@@ -628,16 +671,14 @@
       }
     });
 
-    // Change template
+    // Change template — scroll to top of section (no auto-scroll removed but this is user-initiated)
     document.getElementById('change-template-btn').addEventListener('click', () => {
       document.querySelector('.section').scrollIntoView({ behavior: 'smooth' });
     });
 
-    // Font size
     const fs = document.getElementById('font-size');
     fs.addEventListener('input', () => { updateFontSizeLabel(); updateSliderFill(fs); });
 
-    // Generate + Download
     document.getElementById('generate-btn').addEventListener('click', handleGenerate);
     document.getElementById('download-btn').addEventListener('click', handleDownload);
 
@@ -666,7 +707,8 @@
     if (!texts.some(t => t)) { showError('Enter text in at least one field.'); return; }
     setLoading(true);
     try {
-      const res  = await fetch('/generate', {
+      const endpoint = isGif ? '/generate-gif' : '/generate';
+      const res  = await fetch(endpoint, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           image_url: selectedUrl, texts, zones: currentZones,
@@ -676,27 +718,43 @@
       });
       const data = await res.json();
       if (!res.ok || data.error) { showError(data.error || 'Error generating meme.'); return; }
-      displayMeme(data.image);
-    } catch { showError('Network error — is the server running?'); }
+
+      if (isGif && data.gif) {
+        generatedGifB64 = data.gif;
+        displayMeme(data.gif, 'image/gif', true);
+      } else {
+        generatedGifB64 = null;
+        displayMeme(data.image, 'image/png', false);
+      }
+    } catch (err) { showError('Network error — is the server running?'); }
     finally { setLoading(false); }
   }
 
-  function displayMeme(b64) {
-    const p = document.getElementById('meme-preview');
+  function displayMeme(b64, mime, isAnimated) {
+    const p  = document.getElementById('meme-preview');
     const ph = document.getElementById('preview-placeholder');
     const dl = document.getElementById('download-btn');
-    p.src = `data:image/png;base64,${b64}`; p.dataset.base64 = b64;
-    p.style.display = 'block'; ph.style.display = 'none';
-    dl.disabled = false; dl.classList.add('ready');
-    p.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    p.src = `data:${mime};base64,${b64}`;
+    p.dataset.base64 = b64;
+    p.dataset.mime   = mime;
+    p.style.display  = 'block';
+    ph.style.display = 'none';
+    dl.disabled = false;
+    dl.classList.add('ready');
+    dl.textContent = isAnimated ? '⬇ Download meme.gif' : '⬇ Download meme.png';
+
+    // NO auto-scroll to preview
   }
 
   function handleDownload() {
-    const b64 = document.getElementById('meme-preview').dataset.base64; if (!b64) return;
+    const b64  = document.getElementById('meme-preview').dataset.base64; if (!b64) return;
+    const mime = document.getElementById('meme-preview').dataset.mime || 'image/png';
+    const ext  = mime.includes('gif') ? 'gif' : 'png';
     const bytes = atob(b64), ab = new ArrayBuffer(bytes.length), ia = new Uint8Array(ab);
     for (let i=0;i<bytes.length;i++) ia[i] = bytes.charCodeAt(i);
-    const url = URL.createObjectURL(new Blob([ab],{type:'image/png'}));
-    const a = Object.assign(document.createElement('a'),{href:url,download:'meme.png'});
+    const url = URL.createObjectURL(new Blob([ab],{type:mime}));
+    const a = Object.assign(document.createElement('a'),{href:url,download:`meme.${ext}`});
     document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   }
 

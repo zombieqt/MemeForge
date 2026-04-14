@@ -17,6 +17,13 @@ try:
 except ImportError:
     HAS_TESSERACT = False
 
+# Optional GIF support
+try:
+    from PIL import ImageSequence
+    HAS_GIF = True
+except ImportError:
+    HAS_GIF = False
+
 app = Flask(
     __name__,
     template_folder=os.path.join(os.path.dirname(__file__), '..', 'templates'),
@@ -39,7 +46,62 @@ DEFAULT_ZONES = [
 
 _zone_cache = {}   # url -> {'zones': [...], 'img': PIL.Image}
 
-# ── Meme-API subreddits for unlimited pool ────────────────────────────────────
+# ── Download helper ───────────────────────────────────────────────────────────
+
+DOWNLOAD_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+    'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Referer': 'https://imgflip.com/',
+}
+
+def download_image_bytes(url: str, timeout: int = 14) -> bytes:
+    """Download image bytes, trying multiple strategies for CORS/blocked URLs."""
+    # Strategy 1: direct with spoofed headers
+    try:
+        resp = requests.get(url, timeout=timeout, headers=DOWNLOAD_HEADERS, allow_redirects=True)
+        resp.raise_for_status()
+        if len(resp.content) > 100:
+            return resp.content
+    except Exception as e:
+        print(f"[download] direct failed: {e}")
+
+    # Strategy 2: no referer
+    try:
+        h2 = {k: v for k, v in DOWNLOAD_HEADERS.items() if k != 'Referer'}
+        resp = requests.get(url, timeout=timeout, headers=h2, allow_redirects=True)
+        resp.raise_for_status()
+        if len(resp.content) > 100:
+            return resp.content
+    except Exception as e:
+        print(f"[download] no-referer failed: {e}")
+
+    raise ValueError(f"Could not download image from {url}. The URL may be private or blocked.")
+
+
+def open_image_safe(raw_bytes: bytes) -> Image.Image:
+    """
+    Open image bytes safely. Returns a single PIL Image (first frame for GIFs).
+    Raises on failure with a clean error message.
+    """
+    buf = io.BytesIO(raw_bytes)
+    buf.seek(0)
+    try:
+        img = Image.open(buf)
+        img.load()  # Force loading so we catch errors here
+        # For non-GIF, convert to RGB
+        if img.format != 'GIF':
+            return img.convert('RGB')
+        return img  # Keep GIF as-is
+    except Exception as e:
+        raise ValueError(f"Could not read image file. Make sure the URL points to a valid image (jpg/png/gif). Detail: {e}")
+
+
+def is_gif_url(url: str) -> bool:
+    return bool(re.search(r'\.gif(\?|$)', url, re.IGNORECASE))
+
+
+# ── Meme-API subreddits ───────────────────────────────────────────────────────
 MEME_SUBREDDITS = [
     "memes","dankmemes","me_irl","AdviceAnimals","funny","wholesomememes",
     "terriblefacebookmemes","okbuddyretard","ProgrammerHumor","gaming",
@@ -50,13 +112,12 @@ MEME_SUBREDDITS = [
     "GoodDoggoGoodPupperino","PoliticalHumor","sciencememes","chemicalreactiongifs",
 ]
 
-_meme_api_cache = {}      # subreddit -> [meme, ...]
-_meme_api_all   = []      # flat deduplicated list
+_meme_api_cache = {}
+_meme_api_all   = []
 _meme_api_loaded = False
 
-# ── Extended hardcoded catalog (dedupe guard against API results) ─────────────
+# ── Extended hardcoded catalog ────────────────────────────────────────────────
 EXTRA_CATALOG = [
-    # format: {name, url, genre, boxes}
     {"name":"Surprised Pikachu",          "url":"https://i.imgflip.com/2kbn1e.jpg","genre":"reaction","boxes":1},
     {"name":"Bernie Once Again Asking",   "url":"https://i.imgflip.com/3lmzyx.jpg","genre":"classic", "boxes":1},
     {"name":"Buff Doge vs Cheems",        "url":"https://i.imgflip.com/43a45p.png","genre":"animals", "boxes":4},
@@ -89,7 +150,7 @@ EXTRA_CATALOG = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LAYOUT LIBRARY (unchanged from previous version)
+# LAYOUT LIBRARY
 # ─────────────────────────────────────────────────────────────────────────────
 
 _DRAKE = [
@@ -315,11 +376,6 @@ def resolve_zones(url, name, img):
 # ── OCR text extraction ───────────────────────────────────────────────────────
 
 def _merge_nearby_boxes(data, img_w, img_h, gap_frac=0.03):
-    """
-    Merge Tesseract word boxes that are on the same visual line into
-    paragraph-level regions. Returns list of:
-      {text, x, y, w, h}  in pixel coords
-    """
     words = []
     for i in range(len(data['text'])):
         t = data['text'][i].strip()
@@ -335,16 +391,12 @@ def _merge_nearby_boxes(data, img_w, img_h, gap_frac=0.03):
             'par':   data['par_num'][i],
             'line':  data['line_num'][i],
         })
-
     if not words:
         return []
-
-    # Group by (block, par, line) — same line = same group
     groups = {}
     for w in words:
         key = (w['block'], w['par'], w['line'])
         groups.setdefault(key, []).append(w)
-
     regions = []
     for key, ws in groups.items():
         text = ' '.join(w['text'] for w in ws)
@@ -354,26 +406,22 @@ def _merge_nearby_boxes(data, img_w, img_h, gap_frac=0.03):
         y0 = min(w['y'] for w in ws)
         x1 = max(w['x'] + w['w'] for w in ws)
         y1 = max(w['y'] + w['h'] for w in ws)
-        regions.append({'text': text, 'x': x0, 'y': y0,
-                        'w': x1 - x0, 'h': y1 - y0})
-
+        regions.append({'text': text, 'x': x0, 'y': y0, 'w': x1 - x0, 'h': y1 - y0})
     return regions
 
 
 def _regions_to_zones(regions, img_w, img_h, pad_frac=0.015):
-    """Convert pixel regions to fractional zones, adding padding."""
     zones = []
     for r in regions:
         px = max(0, r['x'] - int(img_w * pad_frac))
         py = max(0, r['y'] - int(img_h * pad_frac))
         pw = min(img_w, r['w'] + int(img_w * pad_frac * 2))
         ph = min(img_h, r['h'] + int(img_h * pad_frac * 2))
-        # Skip tiny regions
         if pw / img_w < 0.05 or ph / img_h < 0.02:
             continue
         zones.append({
-            'label': r['text'][:40],          # existing text = label
-            'text':  r['text'],               # pre-filled value for the input
+            'label': r['text'][:40],
+            'text':  r['text'],
             'x': round(px / img_w, 4),
             'y': round(py / img_h, 4),
             'w': round(min(pw / img_w, 1.0), 4),
@@ -384,10 +432,8 @@ def _regions_to_zones(regions, img_w, img_h, pad_frac=0.015):
 
 
 def _preprocess_for_ocr(pil_img):
-    """Return a list of PIL images to try (original + contrast-enhanced versions)."""
     from PIL import ImageEnhance, ImageFilter
     variants = [pil_img]
-    # High-contrast version
     grey = pil_img.convert('L')
     enhanced = ImageEnhance.Contrast(grey).enhance(2.5)
     variants.append(enhanced.convert('RGB'))
@@ -395,16 +441,10 @@ def _preprocess_for_ocr(pil_img):
 
 
 def ocr_extract(img: Image.Image):
-    """
-    Run Tesseract on the image, return list of zones with detected text.
-    Falls back to None if Tesseract is unavailable or finds nothing.
-    """
     if not HAS_TESSERACT:
         return None
-
     img_w, img_h = img.size
     best_zones = []
-
     for variant in _preprocess_for_ocr(img):
         try:
             data = pytesseract.image_to_data(
@@ -418,7 +458,6 @@ def ocr_extract(img: Image.Image):
                 best_zones = zones
         except Exception as e:
             print(f"[ocr] variant failed: {e}")
-
     return best_zones if best_zones else None
 
 
@@ -504,10 +543,18 @@ def draw_text_block(draw, text, img_w, img_h, zone, color, preferred_size):
         curr_y += lh
 
 
+def _pixel_size_from_params(zone, img_h, preferred):
+    """Compute pixel font size for a zone+preference combination."""
+    zone_h_px  = max(1, zone.get('h', 0.2) * img_h)
+    pct        = (preferred - 14) / (80 - 14)
+    size_frac  = 0.30 + pct * 0.55
+    pixel_size = int(zone_h_px * size_frac)
+    return max(14, pixel_size)
+
+
 # ── Meme sources ──────────────────────────────────────────────────────────────
 
 def _fetch_imgflip():
-    """Fetch ~100 memes from Imgflip public API."""
     try:
         r = requests.get('https://api.imgflip.com/get_memes', timeout=8)
         data = r.json()
@@ -521,12 +568,10 @@ def _fetch_imgflip():
 
 
 def _fetch_meme_api(subreddit, count=20):
-    """Fetch memes from meme-api.com for one subreddit."""
     try:
         r = requests.get(
             f'https://meme-api.com/gimme/{subreddit}/{count}',
-            timeout=8,
-            headers={'User-Agent': 'MemeForge/1.0'}
+            timeout=8, headers={'User-Agent': 'MemeForge/1.0'}
         )
         data = r.json()
         memes = []
@@ -534,13 +579,9 @@ def _fetch_meme_api(subreddit, count=20):
             if m.get('url','').lower().endswith(('.jpg','.jpeg','.png','.gif','.webp')):
                 memes.append({
                     'id':   m.get('postLink','').split('/')[-2] or m['title'][:20],
-                    'name': m['title'],
-                    'url':  m['url'],
-                    'width':  m.get('preview',[None])[-1],
-                    'height': None,
-                    'boxes': 2,
-                    'source': f'reddit/{subreddit}',
-                    'nsfw': m.get('nsfw', False),
+                    'name': m['title'], 'url':  m['url'],
+                    'width':  m.get('preview',[None])[-1], 'height': None,
+                    'boxes': 2, 'source': f'reddit/{subreddit}', 'nsfw': m.get('nsfw', False),
                 })
         return [m for m in memes if not m['nsfw']]
     except Exception as e:
@@ -549,32 +590,21 @@ def _fetch_meme_api(subreddit, count=20):
 
 
 def _build_meme_pool(subreddits=None, per_sub=15):
-    """
-    Build a deduplicated flat pool from Imgflip + Meme-API + extra catalog.
-    Returns list sorted Imgflip-first then by subreddit.
-    """
     seen_urls = set()
     pool = []
-
-    # 1. Imgflip
     for m in _fetch_imgflip():
         if m['url'] not in seen_urls:
             seen_urls.add(m['url']); pool.append(m)
-
-    # 2. Meme-API subreddits
-    subs = subreddits or MEME_SUBREDDITS[:8]   # default: first 8 subs
+    subs = subreddits or MEME_SUBREDDITS[:8]
     for sub in subs:
         for m in _fetch_meme_api(sub, per_sub):
             if m['url'] not in seen_urls:
                 seen_urls.add(m['url']); pool.append(m)
-
-    # 3. Extra catalog
     for m in EXTRA_CATALOG:
         if m['url'] not in seen_urls:
             seen_urls.add(m['url'])
             pool.append({'id':m['url'],'name':m['name'],'url':m['url'],
-                         'width':500,'height':500,'boxes':m['boxes'],
-                         'source':'catalog'})
+                         'width':500,'height':500,'boxes':m['boxes'],'source':'catalog'})
     return pool
 
 
@@ -587,97 +617,70 @@ def index():
 
 @app.route('/api/memes')
 def api_memes():
-    """
-    GET /api/memes?page=0&per_page=24&genre=all&q=searchterm&subreddits=memes,dankmemes
-    Returns paginated meme list from Imgflip + Meme-API + catalog.
-    """
     global _meme_api_all, _meme_api_loaded
 
     page     = int(request.args.get('page', 0))
     per_page = min(int(request.args.get('per_page', 24)), 48)
-    genre    = request.args.get('genre', 'all').lower()
     q        = request.args.get('q', '').lower().strip()
     subs_raw = request.args.get('subreddits', '')
     subs     = [s.strip() for s in subs_raw.split(',') if s.strip()] if subs_raw else None
 
-    # Build pool (cached after first call, refreshed on explicit subreddit request)
     if not _meme_api_loaded or subs:
         _meme_api_all   = _build_meme_pool(subs)
         _meme_api_loaded = True
 
     pool = _meme_api_all
-
-    # Filter
     if q:
         pool = [m for m in pool if q in m['name'].lower()]
 
-    # Genre filter uses client-side detection; server just passes all for now
-    # (genre field is attached client-side after detectGenre())
-
-    total  = len(pool)
-    start  = page * per_page
-    end    = start + per_page
+    total      = len(pool)
+    start      = page * per_page
+    end        = start + per_page
     page_items = pool[start:end]
 
     return jsonify({
-        'memes':    page_items,
-        'total':    total,
-        'page':     page,
-        'per_page': per_page,
-        'has_more': end < total,
+        'memes': page_items, 'total': total,
+        'page': page, 'per_page': per_page, 'has_more': end < total,
     })
 
 
 @app.route('/api/extract-text', methods=['POST'])
 def extract_text():
-    """
-    POST /api/extract-text  {image_url: str}
-
-    Downloads the image, runs OCR to detect existing text regions,
-    returns zones with text pre-filled so the user can edit them.
-
-    Response:
-      {
-        zones: [{label, text, x, y, w, h, pos}, ...],
-        method: 'ocr' | 'fallback',
-        has_tesseract: bool
-      }
-    """
     body = request.json or {}
     url  = body.get('image_url', '').strip()
     if not url:
         return jsonify({'error': 'image_url required'}), 400
 
-    # Download
     try:
-        headers = {'User-Agent': 'Mozilla/5.0 MemeForge/1.0'}
-        resp    = requests.get(url, timeout=12, headers=headers)
-        img     = Image.open(io.BytesIO(resp.content)).convert('RGB')
+        raw = download_image_bytes(url)
+        img = open_image_safe(raw)
+        # For OCR/zone work, use first frame if GIF
+        if getattr(img, 'format', None) == 'GIF':
+            img_rgb = img.convert('RGB')
+        else:
+            img_rgb = img
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
     except Exception as e:
-        return jsonify({'error': f'Could not download image: {e}'}), 400
+        return jsonify({'error': f'Could not load image: {e}'}), 400
 
-    img_w, img_h = img.size
+    img_w, img_h = img_rgb.size
 
-    # Try OCR
-    zones = ocr_extract(img)
+    zones = ocr_extract(img_rgb)
     method = 'ocr'
 
     if not zones:
-        # Fallback: standard zone detection without pre-filled text
         method = 'fallback'
-        z = resolve_zones(url, '', img)
-        # resolve_zones returns zones without 'text' field — add empty
+        z = resolve_zones(url, '', img_rgb)
         zones = [{**zone, 'text': ''} for zone in z]
 
-    # Cache the image so /generate doesn't need to re-download
-    _zone_cache[url] = {'zones': zones, 'img': img}
+    # Cache for /generate (store original img to preserve GIF)
+    _zone_cache[url] = {'zones': zones, 'img': img_rgb, 'raw': raw}
 
     return jsonify({
-        'zones':         zones,
-        'method':        method,
+        'zones': zones, 'method': method,
         'has_tesseract': HAS_TESSERACT,
-        'img_w':         img_w,
-        'img_h':         img_h,
+        'img_w': img_w, 'img_h': img_h,
     })
 
 
@@ -695,19 +698,24 @@ def get_zones():
         return jsonify({'zones': entry['zones'], 'fallback': False})
 
     try:
-        img_data = requests.get(url, timeout=10).content
-        img      = Image.open(io.BytesIO(img_data)).convert('RGB')
+        raw = download_image_bytes(url, timeout=10)
+        img = open_image_safe(raw)
+        if getattr(img, 'format', None) == 'GIF':
+            img_rgb = img.convert('RGB')
+        else:
+            img_rgb = img
     except Exception as e:
         print(f"[zones] Download failed: {e}")
         return jsonify({'zones': DEFAULT_ZONES, 'fallback': True})
 
-    zones = resolve_zones(url, meme_name, img)
-    _zone_cache[url] = {'zones': zones, 'img': img}
+    zones = resolve_zones(url, meme_name, img_rgb)
+    _zone_cache[url] = {'zones': zones, 'img': img_rgb, 'raw': raw}
     return jsonify({'zones': zones, 'fallback': False})
 
 
 @app.route('/generate', methods=['POST'])
 def generate():
+    """Generate a static meme (PNG). Used for non-GIF images."""
     try:
         data         = request.json or {}
         image_url    = data.get('image_url', '').strip()
@@ -722,8 +730,10 @@ def generate():
             img   = cached['img'].copy()
             zones = cached['zones']
         else:
-            raw  = requests.get(image_url, timeout=10).content
-            img  = Image.open(io.BytesIO(raw)).convert('RGB')
+            raw  = download_image_bytes(image_url)
+            img  = open_image_safe(raw)
+            if getattr(img, 'format', None) == 'GIF':
+                img = img.convert('RGB')
             zones = cached.get('zones', DEFAULT_ZONES) if isinstance(cached, dict) else DEFAULT_ZONES
 
         if client_zones and isinstance(client_zones, list) and len(client_zones) > 0:
@@ -734,17 +744,111 @@ def generate():
 
         for i, zone in enumerate(zones):
             if i < len(texts) and texts[i].strip():
+                pixel_size = _pixel_size_from_params(zone, img_h, preferred)
                 short_side = min(img_w, img_h)
-                zone_h_px  = max(1, zone.get('h', 0.2) * img_h)
-                pct        = (preferred - 14) / (80 - 14)
-                size_frac  = 0.30 + pct * 0.55
-                pixel_size = int(zone_h_px * size_frac)
-                pixel_size = max(14, min(pixel_size, short_side // 4))
+                pixel_size = min(pixel_size, short_side // 4)
                 draw_text_block(draw, texts[i].upper(), img_w, img_h, zone, color, pixel_size)
 
         buf = io.BytesIO()
         img.save(buf, format='PNG')
         return jsonify({'image': base64.b64encode(buf.getvalue()).decode()})
+
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/generate-gif', methods=['POST'])
+def generate_gif():
+    """
+    Generate an animated GIF meme with text overlaid on every frame.
+    Falls back to static PNG if GIF processing fails.
+    """
+    try:
+        data         = request.json or {}
+        image_url    = data.get('image_url', '').strip()
+        texts        = data.get('texts', [])
+        client_zones = data.get('zones', None)
+        preferred    = max(10, int(data.get('font_size', 40)))
+        c_hex        = data.get('text_color', '#FFFFFF').lstrip('#').zfill(6)
+        color        = tuple(int(c_hex[i:i+2], 16) for i in (0, 2, 4))
+
+        cached = _zone_cache.get(image_url, {})
+        raw    = cached.get('raw') if isinstance(cached, dict) else None
+
+        if raw is None:
+            raw = download_image_bytes(image_url)
+            if isinstance(cached, dict):
+                cached['raw'] = raw
+                _zone_cache[image_url] = cached
+
+        zones = (cached.get('zones', DEFAULT_ZONES) if isinstance(cached, dict) else DEFAULT_ZONES)
+        if client_zones and isinstance(client_zones, list) and len(client_zones) > 0:
+            zones = client_zones
+
+        # Try to open as GIF
+        gif_buf = io.BytesIO(raw)
+        gif_buf.seek(0)
+        src = Image.open(gif_buf)
+
+        if getattr(src, 'format', None) != 'GIF' or not getattr(src, 'is_animated', False):
+            # Not actually animated — fall back to static PNG
+            img = src.convert('RGB')
+            img_w, img_h = img.size
+            draw = ImageDraw.Draw(img)
+            for i, zone in enumerate(zones):
+                if i < len(texts) and texts[i].strip():
+                    pixel_size = min(_pixel_size_from_params(zone, img_h, preferred), min(img_w, img_h) // 4)
+                    draw_text_block(draw, texts[i].upper(), img_w, img_h, zone, color, pixel_size)
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            return jsonify({'image': base64.b64encode(buf.getvalue()).decode()})
+
+        # Extract frames, draw text on each
+        frames = []
+        durations = []
+        try:
+            for frame in ImageSequence.Iterator(src):
+                fr = frame.copy().convert('RGBA')
+                img_w, img_h = fr.size
+                # Composite onto white background for drawing
+                bg = Image.new('RGBA', (img_w, img_h), (255, 255, 255, 255))
+                bg.paste(fr, mask=fr.split()[3] if fr.mode == 'RGBA' else None)
+                draw = ImageDraw.Draw(bg)
+                for i, zone in enumerate(zones):
+                    if i < len(texts) and texts[i].strip():
+                        pixel_size = min(_pixel_size_from_params(zone, img_h, preferred), min(img_w, img_h) // 4)
+                        draw_text_block(draw, texts[i].upper(), img_w, img_h, zone, color, pixel_size)
+                frames.append(bg.convert('P', palette=Image.ADAPTIVE, dither=Image.Dither.NONE))
+                durations.append(frame.info.get('duration', 50))
+        except Exception as fe:
+            print(f"[gif] frame error: {fe}")
+            # Fallback: static from first frame
+            src.seek(0)
+            img = src.convert('RGB')
+            img_w, img_h = img.size
+            draw = ImageDraw.Draw(img)
+            for i, zone in enumerate(zones):
+                if i < len(texts) and texts[i].strip():
+                    pixel_size = min(_pixel_size_from_params(zone, img_h, preferred), min(img_w, img_h) // 4)
+                    draw_text_block(draw, texts[i].upper(), img_w, img_h, zone, color, pixel_size)
+            buf = io.BytesIO()
+            img.save(buf, format='PNG')
+            return jsonify({'image': base64.b64encode(buf.getvalue()).decode()})
+
+        if not frames:
+            return jsonify({'error': 'GIF has no frames'}), 500
+
+        out = io.BytesIO()
+        frames[0].save(
+            out, format='GIF',
+            save_all=True,
+            append_images=frames[1:],
+            loop=src.info.get('loop', 0),
+            duration=durations,
+            optimize=False,
+        )
+        return jsonify({'gif': base64.b64encode(out.getvalue()).decode()})
 
     except Exception as e:
         import traceback; traceback.print_exc()
